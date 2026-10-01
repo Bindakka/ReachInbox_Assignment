@@ -1,4 +1,5 @@
 import { Request, Response } from "express";
+import { randomUUID } from "crypto";
 import { prisma } from "../config/prisma.js";
 import { emailQueue } from "../services/email.queue.js";
 
@@ -23,6 +24,7 @@ export async function scheduleEmails(req: Request, res: Response) {
       delayMs?: number;
     } = req.body;
 
+    // Validate emails
     if (!Array.isArray(emails) || emails.length === 0) {
       return res.status(400).json({
         success: false,
@@ -30,6 +32,7 @@ export async function scheduleEmails(req: Request, res: Response) {
       });
     }
 
+    // Validate start time
     if (!startTime) {
       return res.status(400).json({
         success: false,
@@ -46,7 +49,7 @@ export async function scheduleEmails(req: Request, res: Response) {
       });
     }
 
-    // Get the logged-in Google user
+    // Get logged-in Google user
     const loggedInUser = req.user as
       | {
           id: string;
@@ -60,6 +63,7 @@ export async function scheduleEmails(req: Request, res: Response) {
       });
     }
 
+    // Verify user exists
     const user = await prisma.user.findUnique({
       where: {
         id: loggedInUser.id,
@@ -73,8 +77,10 @@ export async function scheduleEmails(req: Request, res: Response) {
       });
     }
 
+    // Make sure delay is never negative
     const minimumDelay = Math.max(delayMs, 0);
 
+    // Create database records
     const emailRecords = emails.map((email, index) => {
       const scheduledAt = new Date(
         startDate.getTime() + index * minimumDelay
@@ -88,17 +94,18 @@ export async function scheduleEmails(req: Request, res: Response) {
         scheduledAt,
         status: "SCHEDULED" as const,
 
-        idempotencyKey:
-          `${user.id}-${email.recipient}-` +
-          `${scheduledAt.getTime()}-${index}`,
+        // Unique idempotency key for this email
+        idempotencyKey: randomUUID(),
       };
     });
 
+    // Save emails in PostgreSQL
     const createdEmails =
       await prisma.email.createManyAndReturn({
         data: emailRecords,
       });
 
+    // Create BullMQ jobs
     const jobs = createdEmails.map((email) => ({
       name: "send-email",
 
@@ -120,6 +127,7 @@ export async function scheduleEmails(req: Request, res: Response) {
       },
     }));
 
+    // Add jobs to BullMQ
     await emailQueue.addBulk(jobs);
 
     return res.status(201).json({
@@ -131,7 +139,10 @@ export async function scheduleEmails(req: Request, res: Response) {
       emails: createdEmails,
     });
   } catch (error) {
-    console.error("Schedule emails error:", error);
+    console.error(
+      "Schedule emails error:",
+      error
+    );
 
     return res.status(500).json({
       success: false,
